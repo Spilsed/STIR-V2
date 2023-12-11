@@ -6,6 +6,7 @@ from torchvision.datasets import VOCDetection
 from torch.utils.data import DataLoader
 import cv2
 from torchvision import transforms
+from torchvision import ops
 import numpy as np
 
 voc_2012_classes = ['background', 'Aeroplane', "Bicycle", 'Bird', "Boat", "Bottle", "Bus", "Car", "Cat", "Chair", 'Cow',
@@ -32,46 +33,27 @@ def train_svm(svm, train, val, optimizer):
             bbox = bbox["bndbox"]
             cv2_image = np.array(image.convert('RGB'))[:, :, ::-1]
             cv2_image = cv2.UMat(cv2_image)
-            cv2.rectangle(cv2_image, (int(bbox["xmin"]), int(bbox["ymax"])), (int(bbox["xmax"]), int(bbox["ymin"])),
-                          [200, 20, 250], 2)
+            cv2.rectangle(cv2_image, (int(bbox["xmin"]), int(bbox["ymax"])), (int(bbox["xmax"]), int(bbox["ymin"])), [200, 20, 250], 2)
+            old_bbox = bbox
             bbox = {"x1": int(bbox["xmin"]), "y1": int(bbox["ymax"]), "x2": int(bbox["xmax"]), "y2": int(bbox["ymin"])}
             for ss_bbox in ss_results:
                 # ss_box = [x, y, w, h]
-                x = ss_bbox[0]
-                y = ss_bbox[1]
-                w = ss_bbox[2]
-                h = ss_bbox[3]
-                iou = calculate_IoU(bbox, {"x1": ss_bbox[0], "y1": ss_bbox[1]+ss_bbox[3], "x2": ss_bbox[0]+ss_bbox[2], "y2": ss_bbox[1]})
-                cv2.rectangle(cv2_image, (x, y), (x + w, y + h), [150, 0, 25], 2)
-                if iou > 0.0:
-                    print(iou)
+                print(bbox, {"x1": ss_bbox[0], "y1": ss_bbox[1]+ss_bbox[3], "x2": ss_bbox[0]+ss_bbox[2], "y2": ss_bbox[1]})
+
+                gt_bbox_t = torch.tensor([[bbox["x1"], bbox["y2"], bbox["x2"], bbox["y1"]]], dtype=torch.float)
+                print(gt_bbox_t)
+                ss_bbox_t = torch.tensor([[ss_bbox[0], ss_bbox[1], ss_bbox[0] + ss_bbox[2], ss_bbox[1] + ss_bbox[3]]], dtype=torch.float)
+                print(ss_bbox_t)
+
+                iou = ops.box_iou(gt_bbox_t, ss_bbox_t).numpy()
+                cv2.rectangle(cv2_image, (ss_bbox[0], ss_bbox[1]), (ss_bbox[0]+ss_bbox[2], ss_bbox[1]+ss_bbox[3]), [150, 0, 25], 2)
+                print(iou)
                 cv2.imshow("HJ", cv2_image)
                 cv2.waitKey(0)
 
 
-def calculate_IoU(bb1, bb2):
-    # calculate IoU(Intersection over Union) of 2 boxes
-    # **IoU = Area of Overlap / Area of Union
-    # https://github.com/Hulkido/RCNN/blob/master/RCNN.ipynb
-
-    x_left = max(bb1['x1'], bb2['x1'])
-    y_top = max(bb1['y1'], bb2['y1'])
-    x_right = min(bb1['x2'], bb2['x2'])
-    y_bottom = min(bb1['y2'], bb2['y2'])
-    # if there is no overlap output 0 as intersection area is zero.
-    if x_right < x_left or y_bottom < y_top:
-        return 0.0
-    # calculate Overlapping area
-    intersection_area = (x_right - x_left) * (y_bottom - y_top)
-    bb1_area = (bb1['x2'] - bb1['x1']) * (bb1['y2'] - bb1['y1'])
-    bb2_area = (bb2['x2'] - bb2['x1']) * (bb2['y2'] - bb2['y1'])
-    union_area = bb1_area + bb2_area - intersection_area
-
-    return intersection_area / union_area
-
-
 def selective_search(image):
-    # return region proposals of selective searh over an image
+    # return region proposals of selective search over an image
     ss = cv2.ximgproc.segmentation.createSelectiveSearchSegmentation()
     ss.setBaseImage(image)
     ss.switchToSelectiveSearchFast()
