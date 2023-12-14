@@ -180,10 +180,6 @@ class RCNNDataset(torch.utils.data.Dataset):
 
         print("-= GENERATING DATASET =-")
         for index, (image, data) in enumerate(tqdm(dataloader.dataset)):
-            # TODO: Remove 500 image limit after testing (I'm not waiting 3:30:00 every time I test obv)--
-            if index >= 100:
-                break
-
             # Get selective search for whole image
             ss_results = selective_search(np.array(image.convert('RGB'))[:, :, ::-1])
 
