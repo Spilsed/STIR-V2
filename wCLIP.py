@@ -108,13 +108,11 @@ def train_svm(svm, train, val, optimizer, loss_fn, epochs: int = 1):
 
                     vloss = loss_fn(torch.cat(outputs).to(torch.float32).squeeze(0).cuda(),
                                     torch.cat(correct_outputs).to(torch.float32).cuda())
-                    vrunning_loss += vloss
-
-                avg_vloss = vrunning_loss / (i + 1)
 
                 last_loss = running_loss / (32 * 10)  # loss per batch
-                print('Batch {} loss: {} vloss: {}'.format(i + 1, last_loss, avg_vloss))
+                print('Batch {} loss: {} vloss: {}'.format(i + 1, last_loss, vloss))
                 running_loss = 0.
+                vrunning_loss = 0.
 
     return last_loss
 
