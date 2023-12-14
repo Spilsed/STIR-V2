@@ -1,7 +1,7 @@
+import multiprocessing
 import os.path
 import pickle
 import random as r
-import threading
 from datetime import datetime
 
 import torch
@@ -189,7 +189,7 @@ class RCNNDataset(torch.utils.data.Dataset):
             threads = []
             for obj in data["annotation"]["object"]:
                 # Get the bounding boxes for the object (128)
-                threading.Thread(target=self.process_object, args=(obj, ss_results, image, image_ratio))
+                multiprocessing.Process(target=self.process_object, args=(obj, ss_results, image, image_ratio))
 
             # Start all the threads
             for thread in threads:
