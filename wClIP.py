@@ -1,10 +1,12 @@
 import os.path
 import pickle
+import random as r
+from datetime import datetime
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import clip
-import torchvision.transforms
 from torchvision.datasets import VOCDetection
 from torch.utils.data import DataLoader
 import cv2
@@ -39,15 +41,82 @@ class SVM(nn.Module):
         return self.fc(x)
 
 
-def train_svm(svm, train, val, optimizer):
+def train_svm(svm, train, val, optimizer, loss_fn, epochs: int = 1):
+    # Initialize loss variables
     running_loss = 0.0
     last_loss = 0.0
+    vrunning_loss = 0.0
 
-    for i, (image, data) in enumerate(train):
-        # Get selective search results
-        ss_results = selective_search(np.array(image.convert('RGB'))[:, :, ::-1])
+    # Load clip model
+    model, preprocess = clip.load("ViT-B/16", device="cuda")
 
+    toPIL = transforms.ToPILImage()
 
+    # Shuffle the datasets
+    train.shuffle()
+    val.shuffle()
+
+    for epoch in tqdm(range(epochs)):
+        images = []
+        labels = []
+
+        vimages = []
+        vlabels = []
+
+        for i, data in enumerate(tqdm(train)):
+            images.append(data["image"])
+            labels.append(data["label"])
+
+            vimages.append(val[i]["image"])
+            vlabels.append(val[i]["label"])
+
+            # TODO: This cannot be the best way
+            if (i + 1) % 32 != 0:
+                continue
+
+            optimizer.zero_grad()
+
+            # Get the outputs
+            correct_outputs = []
+            outputs = []
+            for x, image in enumerate(images):
+                feature = model.encode_image(preprocess(toPIL(image)).unsqueeze(0).cuda()).to(torch.float32)
+                correct_outputs.append(F.one_hot(torch.tensor(labels[x]), num_classes=len(voc_2012_classes)).unsqueeze(0))
+                outputs.append(svm.forward(feature))
+            images = []
+
+            # Calculate loss with loss_fn
+            loss = loss_fn(torch.cat(outputs).to(torch.float32).squeeze(0).cuda(), torch.cat(correct_outputs).to(torch.float32).cuda())
+            loss.backward()
+
+            optimizer.step()
+
+            running_loss += loss.item()
+            # Every 10 batches print loss and preform validation
+            if (i + 1) % (32 * 10) == 0:
+                # Preform validation
+                with torch.no_grad():
+                    correct_outputs = []
+                    outputs = []
+
+                    for x, image in enumerate(vimages):
+                        feature = model.encode_image(preprocess(toPIL(image)).unsqueeze(0).cuda()).to(torch.float32)
+                        correct_outputs.append(
+                            F.one_hot(torch.tensor(vlabels[x]), num_classes=len(voc_2012_classes)).unsqueeze(0))
+                        outputs.append(svm.forward(feature))
+                    images = []
+
+                    vloss = loss_fn(torch.cat(outputs).to(torch.float32).squeeze(0).cuda(),
+                                    torch.cat(correct_outputs).to(torch.float32).cuda())
+                    vrunning_loss += vloss
+
+                avg_vloss = vrunning_loss / (i + 1)
+
+                last_loss = running_loss / (32 * 10)  # loss per batch
+                print('Batch {} loss: {} vloss: {}'.format(i + 1, last_loss, avg_vloss))
+                running_loss = 0.
+
+    return last_loss
 
 
 def selective_search(image):
@@ -83,13 +152,12 @@ class RCNNDataset(torch.utils.data.Dataset):
             print("-= LOADING DATASET FROM", self.data_path, "=-")
             with open(self.data_path + 'train_images.pkl', 'rb') as f:
                 self.train_images = pickle.load(f)
-                print(self.train_images[:10])
             with open(self.data_path + 'train_labels.pkl', 'rb') as f:
                 self.train_labels = pickle.load(f)
 
     def dataset_exists(self):
         # If both don't exist the other is kinda worthless
-        if os.path.exists(self.data_path + self.data_type + "_images.pkl") and os.path.exists(self.data_path + self.data_type + "train_labels.pkl"):
+        if os.path.exists(self.data_path + self.data_type + "_images.pkl") and os.path.exists(self.data_path + self.data_type + "_labels.pkl"):
             return True
         else:
             return False
@@ -101,6 +169,10 @@ class RCNNDataset(torch.utils.data.Dataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
         return {"image": self.transform(Image.fromarray(cv2.cvtColor(self.train_images[idx], cv2.COLOR_BGR2RGB))), "label": self.train_labels[idx][0], "bbox": self.train_labels[idx][1]}
+
+    def shuffle(self):
+        r.shuffle(self.train_images)
+        r.shuffle(self.train_labels)
 
     def generate_dataset(self, dataloader: DataLoader, iou_threshold: float, image_ratio: tuple[int, int]):
         obj_counter = 0
@@ -161,6 +233,9 @@ class RCNNDataset(torch.utils.data.Dataset):
                         obj_counter -= image_ratio[0]
                         bg_counter = 0
 
+        r.shuffle(self.train_images)
+        r.shuffle(self.train_labels)
+
         print("-= DATASET FINALIZED WITH ", len(self.train_images), "DATA POINTS =-", "\n-= SAVING DATA TO",
               self.data_path, "=-")
 
@@ -185,21 +260,16 @@ def main():
         pickle.dump(train_dataset, f)
 
     # Create and save val dataset
-    val_dataset = RCNNDataset(dataloader_train, "val")
+    val_dataset = RCNNDataset(dataloader_val, "val")
     with open("./" + "val_FullDataset.pkl", "wb") as f:
-        pickle.dump(train_dataset, f)
+        pickle.dump(val_dataset, f)
 
-    print(train_dataset[0])
-    toPIL = transforms.ToPILImage()
-    for i in range(100, 120):
-        toPIL(train_dataset.__getitem__(i)["image"]).show()
-
-    svm = SVM(21)
-    print(svm.forward(torch.rand(512)))
+    svm = SVM(21).cuda(device=0)
 
     optimizer = torch.optim.AdamW(svm.parameters(), lr=1e-3)
+    loss_fn = nn.CrossEntropyLoss().cuda(device=0)
 
-    train_svm(svm, train_dataset, voc_val, optimizer)
+    train_svm(svm, train_dataset, val_dataset, optimizer, loss_fn, 1)
 
 
 if __name__ == "__main__":
