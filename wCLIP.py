@@ -185,17 +185,17 @@ class RCNNDataset(torch.utils.data.Dataset):
             # Get selective search for whole image
             ss_results = selective_search(np.array(image.convert('RGB'))[:, :, ::-1])
 
-            # Create a new thread for each object
+            # Create a new process for each object
             processes = []
             for obj in data["annotation"]["object"]:
                 # Get the bounding boxes for the object (128)
                 multiprocessing.Process(target=self.process_object, args=(obj, ss_results, image, image_ratio))
 
-            # Start all the threads
+            # Start all the processes
             for process in processes:
                 process.start()
 
-            # Join the threads so it waits until they all finish (possibly unnecessary?)
+            # Join the processes so it waits until they all finish (possibly unnecessary?)
             for process in processes:
                 process.join()
 
