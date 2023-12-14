@@ -1,6 +1,7 @@
 import os.path
 import pickle
 import random as r
+import threading
 from datetime import datetime
 
 import torch
@@ -138,6 +139,11 @@ class RCNNDataset(torch.utils.data.Dataset):
         self.train_labels = []
         self.train_images = []
 
+        self.total_obj_counter = 0
+        self.total_bg_counter = 0
+
+        self.iou_threshold = iou_threshold
+
         self.transform = transforms.Compose([
             transforms.Resize((size, size)),
             transforms.ToTensor(),
@@ -145,7 +151,7 @@ class RCNNDataset(torch.utils.data.Dataset):
 
         # If the dataset doesn't exist, or it is being force remade generate a new dataset
         if not self.dataset_exists() or force_remake:
-            self.generate_dataset(dataloader, iou_threshold, image_ratio)
+            self.generate_dataset(dataloader, image_ratio)
         else:
             print("-= LOADING DATASET FROM", self.data_path, "=-")
             with open(self.data_path + 'train_images.pkl', 'rb') as f:
@@ -172,60 +178,26 @@ class RCNNDataset(torch.utils.data.Dataset):
         r.shuffle(self.train_images)
         r.shuffle(self.train_labels)
 
-    def generate_dataset(self, dataloader: DataLoader, iou_threshold: float, image_ratio: tuple[int, int]):
-        obj_counter = 0
-        bg_counter = 0
-        total_obj_counter = 0
-        total_bg_counter = 0
+    def generate_dataset(self, dataloader: DataLoader, image_ratio: tuple[int, int]):
 
         print("-= GENERATING DATASET =-")
         for index, (image, data) in enumerate(tqdm(dataloader.dataset)):
             # Get selective search for whole image
             ss_results = selective_search(np.array(image.convert('RGB'))[:, :, ::-1])
 
-            # IDEA: Multi-threading? There are never more then ~24 objects. So each could run in its own thread.
-            # For object in data get the bounding box
+            # Create a new thread for each object
+            threads = []
             for obj in data["annotation"]["object"]:
-                bbox = obj["bndbox"]
+                # Get the bounding boxes for the object (128)
+                threading.Thread(target=self.process_object, args=(obj, ss_results, image, image_ratio))
 
-                # Iterate through every predicted bbox
-                for ss_bbox in ss_results:
-                    gt_bbox_t = torch.tensor(
-                        [[int(bbox["xmin"]), int(bbox["ymin"]), int(bbox["xmax"]), int(bbox["ymax"])]],
-                        dtype=torch.float)
-                    ss_bbox_t = torch.tensor(
-                        [[ss_bbox[0], ss_bbox[1], ss_bbox[0] + ss_bbox[2], ss_bbox[1] + ss_bbox[3]]],
-                        dtype=torch.float)
+            # Start all the threads
+            for thread in threads:
+                thread.start()
 
-                    # Calculate the IoU
-                    iou = ops.box_iou(gt_bbox_t, ss_bbox_t).numpy()[0][0]
-
-                    # Mark ss_bbox as positive if the IoU is above threshold
-                    if iou >= iou_threshold:
-                        obj_counter += 1
-                        total_obj_counter += 1
-
-                        # Crop image to ss_box
-                        cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2], ::-1]
-
-                        # Add cropped to images and label to labels
-                        self.train_images.append(cropped)
-                        self.train_labels.append([label_to_index(obj["name"]), ss_bbox])
-
-                    elif bg_counter < image_ratio[1]:
-                        bg_counter += 1
-                        total_bg_counter += 1
-
-                        # Crop image to ss_box (", ::-1]" to change from BGR to RGB)
-                        cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2], ::-1]
-
-                        self.train_images.append(cropped)
-                        self.train_labels.append([0, ss_bbox])
-
-                    # Maintain ratio between the types
-                    if obj_counter >= image_ratio[0] and bg_counter == image_ratio[1]:
-                        obj_counter -= image_ratio[0]
-                        bg_counter = 0
+            # Join the threads so it waits until they all finish (possibly unnecessary?)
+            for thread in threads:
+                thread.join()
 
         r.shuffle(self.train_images)
         r.shuffle(self.train_labels)
@@ -238,6 +210,53 @@ class RCNNDataset(torch.utils.data.Dataset):
             pickle.dump(self.train_labels, f)
         with open(self.data_path + self.data_type + "_images.pkl", "wb") as f:
             pickle.dump(self.train_images, f)
+
+    def process_object(self, obj, ss_results, image, image_ratio):
+        obj_counter = 0
+        bg_counter = 0
+
+        bbox = obj["bndbox"]
+
+        # Iterate through every predicted bbox
+        for ss_bbox in ss_results:
+            gt_bbox_t = torch.tensor(
+                [[int(bbox["xmin"]), int(bbox["ymin"]), int(bbox["xmax"]), int(bbox["ymax"])]],
+                dtype=torch.float)
+            ss_bbox_t = torch.tensor(
+                [[ss_bbox[0], ss_bbox[1], ss_bbox[0] + ss_bbox[2], ss_bbox[1] + ss_bbox[3]]],
+                dtype=torch.float)
+
+            # Calculate the IoU
+            iou = ops.box_iou(gt_bbox_t, ss_bbox_t).numpy()[0][0]
+
+            # Mark ss_bbox as positive if the IoU is above threshold
+            if iou >= self.iou_threshold:
+                obj_counter += 1
+                self.total_obj_counter += 1
+
+                # Crop image to ss_box
+                cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2],
+                          ::-1]
+
+                # Add cropped to images and label to labels
+                self.train_images.append(cropped)
+                self.train_labels.append([label_to_index(obj["name"]), ss_bbox])
+
+            elif bg_counter < image_ratio[1]:
+                bg_counter += 1
+                self.total_bg_counter += 1
+
+                # Crop image to ss_box (", ::-1]" to change from BGR to RGB)
+                cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2],
+                          ::-1]
+
+                self.train_images.append(cropped)
+                self.train_labels.append([0, ss_bbox])
+
+            # Maintain ratio between the types
+            if obj_counter >= image_ratio[0] and bg_counter == image_ratio[1]:
+                obj_counter -= image_ratio[0]
+                bg_counter = 0
 
 def main():
     device = torch.device("cuda:0")
