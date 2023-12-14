@@ -186,18 +186,18 @@ class RCNNDataset(torch.utils.data.Dataset):
             ss_results = selective_search(np.array(image.convert('RGB'))[:, :, ::-1])
 
             # Create a new thread for each object
-            threads = []
+            processes = []
             for obj in data["annotation"]["object"]:
                 # Get the bounding boxes for the object (128)
                 multiprocessing.Process(target=self.process_object, args=(obj, ss_results, image, image_ratio))
 
             # Start all the threads
-            for thread in threads:
-                thread.start()
+            for process in processes:
+                process.start()
 
             # Join the threads so it waits until they all finish (possibly unnecessary?)
-            for thread in threads:
-                thread.join()
+            for process in processes:
+                process.join()
 
         r.shuffle(self.train_images)
         r.shuffle(self.train_labels)
