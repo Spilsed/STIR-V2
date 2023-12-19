@@ -46,7 +46,6 @@ def train_svm(svm, train, val, optimizer, loss_fn, epochs: int = 1):
     # Initialize loss variables
     running_loss = 0.0
     last_loss = 0.0
-    vrunning_loss = 0.0
 
     # Load clip model
     model, preprocess = clip.load("ViT-B/16", device="cuda")
@@ -82,12 +81,14 @@ def train_svm(svm, train, val, optimizer, loss_fn, epochs: int = 1):
             outputs = []
             for x, image in enumerate(images):
                 feature = model.encode_image(preprocess(toPIL(image)).unsqueeze(0).cuda()).to(torch.float32)
-                correct_outputs.append(F.one_hot(torch.tensor(labels[x]), num_classes=len(voc_2012_classes)).unsqueeze(0))
+                correct_outputs.append(
+                    F.one_hot(torch.tensor(labels[x]), num_classes=len(voc_2012_classes)).unsqueeze(0))
                 outputs.append(svm.forward(feature))
             images = []
 
             # Calculate loss with loss_fn
-            loss = loss_fn(torch.cat(outputs).to(torch.float32).squeeze(0).cuda(), torch.cat(correct_outputs).to(torch.float32).cuda())
+            loss = loss_fn(torch.cat(outputs).to(torch.float32).squeeze(0).cuda(),
+                           torch.cat(correct_outputs).to(torch.float32).cuda())
             loss.backward()
 
             optimizer.step()
@@ -113,7 +114,6 @@ def train_svm(svm, train, val, optimizer, loss_fn, epochs: int = 1):
                 last_loss = running_loss / (32 * 10)  # loss per batch
                 print('Batch {} loss: {} vloss: {}'.format(i + 1, last_loss, vloss))
                 running_loss = 0.
-                vrunning_loss = 0.
 
     return last_loss
 
@@ -131,7 +131,8 @@ def transform_to_dataset(image, annotations):
 
 
 class RCNNDataset(torch.utils.data.Dataset):
-    def __init__(self, dataloader: DataLoader, data_type: str = "train", size: int = 224, force_remake: bool = False, iou_threshold: float = 0.5,
+    def __init__(self, dataloader: DataLoader, data_type: str = "train", size: int = 224, force_remake: bool = False,
+                 iou_threshold: float = 0.5,
                  image_ratio: tuple[int, int] = (32, 96), data_path: str = "./"):
         self.dataloader = dataloader
         self.data_path = data_path
@@ -161,7 +162,8 @@ class RCNNDataset(torch.utils.data.Dataset):
 
     def dataset_exists(self):
         # If both don't exist the other is kinda worthless
-        if os.path.exists(self.data_path + self.data_type + "_images.pkl") and os.path.exists(self.data_path + self.data_type + "_labels.pkl"):
+        if os.path.exists(self.data_path + self.data_type + "_images.pkl") and os.path.exists(
+                self.data_path + self.data_type + "_labels.pkl"):
             return True
         else:
             return False
@@ -172,7 +174,8 @@ class RCNNDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        return {"image": self.transform(Image.fromarray(cv2.cvtColor(self.train_images[idx], cv2.COLOR_BGR2RGB))), "label": self.train_labels[idx][0], "bbox": self.train_labels[idx][1]}
+        return {"image": self.transform(Image.fromarray(cv2.cvtColor(self.train_images[idx], cv2.COLOR_BGR2RGB))),
+                "label": self.train_labels[idx][0], "bbox": self.train_labels[idx][1]}
 
     def shuffle(self):
         r.shuffle(self.train_images)
@@ -181,6 +184,13 @@ class RCNNDataset(torch.utils.data.Dataset):
     def generate_dataset(self, dataloader: DataLoader, image_ratio: tuple[int, int]):
 
         print("-= GENERATING DATASET =-")
+        # Make a manager so all processes can access the temp arrays
+        manager = multiprocessing.Manager()
+
+        # Create temp lists processes can use
+        t_labels = manager.list()
+        t_images = manager.list()
+
         for index, (image, data) in enumerate(tqdm(dataloader.dataset)):
             # Get selective search for whole image
             ss_results = selective_search(np.array(image.convert('RGB'))[:, :, ::-1])
@@ -189,21 +199,23 @@ class RCNNDataset(torch.utils.data.Dataset):
             processes = []
             for obj in data["annotation"]["object"]:
                 # Get the bounding boxes for the object (128)
-                multiprocessing.Process(target=self.process_object, args=(obj, ss_results, image, image_ratio))
+                processes.append(multiprocessing.Process(target=self.process_object, args=(t_labels, t_images, obj, ss_results, image, image_ratio)))
+                processes[-1].start()
 
-            # Start all the processes
-            for process in processes:
-                process.start()
-
-            # Join the processes so it waits until they all finish (possibly unnecessary?)
+            # Join the processes, so it waits until they all finish (possibly unnecessary?)
             for process in processes:
                 process.join()
+
+            self.train_labels += list(t_labels)
+            self.train_images += list(t_images)
+
+            t_labels = manager.list()
+            t_images = manager.list()
 
         r.shuffle(self.train_images)
         r.shuffle(self.train_labels)
 
-        print("-= DATASET FINALIZED WITH ", len(self.train_images), "DATA POINTS =-", "\n-= SAVING DATA TO",
-              self.data_path, "=-")
+        print("-= DATASET FINALIZED WITH ", len(self.train_images), "DATA POINTS =-", "\n-= SAVING DATA TO", self.data_path, "=-")
 
         # Dump all that data as a pickle so that it can just be reloaded later
         with open(self.data_path + self.data_type + "_labels.pkl", "wb") as f:
@@ -211,9 +223,12 @@ class RCNNDataset(torch.utils.data.Dataset):
         with open(self.data_path + self.data_type + "_images.pkl", "wb") as f:
             pickle.dump(self.train_images, f)
 
-    def process_object(self, obj, ss_results, image, image_ratio):
+    def process_object(self, t_labels, t_images, obj, ss_results, image, image_ratio):
         obj_counter = 0
         bg_counter = 0
+
+        process_labels = []
+        process_images = []
 
         bbox = obj["bndbox"]
 
@@ -232,31 +247,31 @@ class RCNNDataset(torch.utils.data.Dataset):
             # Mark ss_bbox as positive if the IoU is above threshold
             if iou >= self.iou_threshold:
                 obj_counter += 1
-                self.total_obj_counter += 1
 
                 # Crop image to ss_box
-                cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2],
-                          ::-1]
+                cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2],::-1]
 
                 # Add cropped to images and label to labels
-                self.train_images.append(cropped)
-                self.train_labels.append([label_to_index(obj["name"]), ss_bbox])
+                process_images.append(cropped)
+                process_labels.append([label_to_index(obj["name"]), ss_bbox])
 
             elif bg_counter < image_ratio[1]:
                 bg_counter += 1
-                self.total_bg_counter += 1
 
                 # Crop image to ss_box (", ::-1]" to change from BGR to RGB)
-                cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2],
-                          ::-1]
+                cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2], ::-1]
 
-                self.train_images.append(cropped)
-                self.train_labels.append([0, ss_bbox])
+                process_images.append(cropped)
+                process_labels.append([0, ss_bbox])
 
             # Maintain ratio between the types
             if obj_counter >= image_ratio[0] and bg_counter == image_ratio[1]:
                 obj_counter -= image_ratio[0]
                 bg_counter = 0
+
+        t_labels += process_labels
+        t_images += process_images
+
 
 def main():
     device = torch.device("cuda:0")
@@ -279,10 +294,14 @@ def main():
 
     svm = SVM(21).cuda(device=0)
 
+    print(len(train_dataset))
+
     optimizer = torch.optim.AdamW(svm.parameters(), lr=1e-3)
     loss_fn = nn.CrossEntropyLoss().cuda(device=0)
 
-    train_svm(svm, train_dataset, val_dataset, optimizer, loss_fn, 1)
+    train_svm(svm, train_dataset, val_dataset, optimizer, loss_fn, 10)
+
+    torch.save(svm.state_dict(), "./Model")
 
 
 if __name__ == "__main__":
