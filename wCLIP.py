@@ -184,33 +184,13 @@ class RCNNDataset(torch.utils.data.Dataset):
     def generate_dataset(self, dataloader: DataLoader, image_ratio: tuple[int, int]):
 
         print("-= GENERATING DATASET =-")
-        # Make a manager so all processes can access the temp arrays
-        manager = multiprocessing.Manager()
-
-        # Create temp lists processes can use
-        t_labels = manager.list()
-        t_images = manager.list()
-
         for index, (image, data) in enumerate(tqdm(dataloader.dataset)):
             # Get selective search for whole image
             ss_results = selective_search(np.array(image.convert('RGB'))[:, :, ::-1])
 
-            # Create a new process for each object
-            processes = []
+            # Process each object
             for obj in data["annotation"]["object"]:
-                # Get the bounding boxes for the object (128)
-                processes.append(multiprocessing.Process(target=self.process_object, args=(t_labels, t_images, obj, ss_results, image, image_ratio)))
-                processes[-1].start()
-
-            # Join the processes, so it waits until they all finish (possibly unnecessary?)
-            for process in processes:
-                process.join()
-
-            self.train_labels += list(t_labels)
-            self.train_images += list(t_images)
-
-            t_labels = manager.list()
-            t_images = manager.list()
+                self.process_object(obj, ss_results, image, image_ratio)
 
         r.shuffle(self.train_images)
         r.shuffle(self.train_labels)
@@ -223,12 +203,9 @@ class RCNNDataset(torch.utils.data.Dataset):
         with open(self.data_path + self.data_type + "_images.pkl", "wb") as f:
             pickle.dump(self.train_images, f)
 
-    def process_object(self, t_labels, t_images, obj, ss_results, image, image_ratio):
+    def process_object(self, obj, ss_results, image, image_ratio):
         obj_counter = 0
         bg_counter = 0
-
-        process_labels = []
-        process_images = []
 
         bbox = obj["bndbox"]
 
@@ -252,8 +229,8 @@ class RCNNDataset(torch.utils.data.Dataset):
                 cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2],::-1]
 
                 # Add cropped to images and label to labels
-                process_images.append(cropped)
-                process_labels.append([label_to_index(obj["name"]), ss_bbox])
+                self.train_images.append(cropped)
+                self.train_labels.append([label_to_index(obj["name"]), ss_bbox])
 
             elif bg_counter < image_ratio[1]:
                 bg_counter += 1
@@ -261,16 +238,13 @@ class RCNNDataset(torch.utils.data.Dataset):
                 # Crop image to ss_box (", ::-1]" to change from BGR to RGB)
                 cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2], ::-1]
 
-                process_images.append(cropped)
-                process_labels.append([0, ss_bbox])
+                self.train_images.append(cropped)
+                self.train_labels.append([0, ss_bbox])
 
             # Maintain ratio between the types
             if obj_counter >= image_ratio[0] and bg_counter == image_ratio[1]:
                 obj_counter -= image_ratio[0]
                 bg_counter = 0
-
-        t_labels += process_labels
-        t_images += process_images
 
 
 def main():
