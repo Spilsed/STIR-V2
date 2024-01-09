@@ -1,8 +1,7 @@
-import multiprocessing
 import os.path
 import pickle
 import random as r
-from datetime import datetime
+import sys
 
 import torch
 import torch.nn as nn
@@ -133,9 +132,10 @@ def transform_to_dataset(image, annotations):
 class RCNNDataset(torch.utils.data.Dataset):
     def __init__(self, dataloader: DataLoader, data_type: str = "train", size: int = 224, force_remake: bool = False,
                  iou_threshold: float = 0.5,
-                 image_ratio: tuple[int, int] = (32, 96), data_path: str = "./"):
+                 image_ratio: tuple[int, int] = (32, 96), data_path: str = "./cache", section_size: int = 50):
         self.dataloader = dataloader
-        self.data_path = data_path
+        self.data_path = data_path + "/" if data_path[-1] != "/" else data_path
+        self.section_size = section_size
         self.data_type = data_type
         self.train_labels = []
         self.train_images = []
@@ -192,16 +192,17 @@ class RCNNDataset(torch.utils.data.Dataset):
             for obj in data["annotation"]["object"]:
                 self.process_object(obj, ss_results, image, image_ratio)
 
-        r.shuffle(self.train_images)
-        r.shuffle(self.train_labels)
+            del ss_results
+
+            print("IMAGES: ", sys.getsizeof(self.train_images) / 1e9, "GB")
+            print("LABELS: ", sys.getsizeof(self.train_labels) / 1e9, "GB")
+
+            if index % self.section_size == 0 and index != 0:
+                self.create_section(index % self.section_size)
+
+        self.shuffle()
 
         print("-= DATASET FINALIZED WITH ", len(self.train_images), "DATA POINTS =-", "\n-= SAVING DATA TO", self.data_path, "=-")
-
-        # Dump all that data as a pickle so that it can just be reloaded later
-        with open(self.data_path + self.data_type + "_labels.pkl", "wb") as f:
-            pickle.dump(self.train_labels, f)
-        with open(self.data_path + self.data_type + "_images.pkl", "wb") as f:
-            pickle.dump(self.train_images, f)
 
     def process_object(self, obj, ss_results, image, image_ratio):
         obj_counter = 0
@@ -226,7 +227,7 @@ class RCNNDataset(torch.utils.data.Dataset):
                 obj_counter += 1
 
                 # Crop image to ss_box
-                cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2],::-1]
+                cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2], ::-1]
 
                 # Add cropped to images and label to labels
                 self.train_images.append(cropped)
@@ -245,6 +246,17 @@ class RCNNDataset(torch.utils.data.Dataset):
             if obj_counter >= image_ratio[0] and bg_counter == image_ratio[1]:
                 obj_counter -= image_ratio[0]
                 bg_counter = 0
+        return
+
+    # Dump all that data as a pickle so that it can just be reloaded later
+    def create_section(self, section_id: int):
+        with open(self.data_path + self.data_type + "_labels_" + str(section_id) +".pkl", "wb") as f:
+            pickle.dump(self.train_labels, f)
+        with open(self.data_path + self.data_type + "_images_" + str(section_id) +".pkl", "wb") as f:
+            pickle.dump(self.train_images, f)
+
+        self.train_labels = []
+        self.train_images = []
 
 
 def main():
