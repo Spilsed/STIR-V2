@@ -134,16 +134,16 @@ class RCNNDataset(torch.utils.data.Dataset):
                  iou_threshold: float = 0.5,
                  image_ratio: tuple[int, int] = (32, 96), data_path: str = "./cache", section_size: int = 50):
         self.dataloader = dataloader
-        self.data_path = data_path + "/" if data_path[-1] != "/" else data_path
-        self.section_size = section_size
-        self.data_type = data_type
-        self.train_labels = []
-        self.train_images = []
+        self.data_path: str = data_path + "/" if data_path[-1] != "/" else data_path
+        self.section_size: int = section_size
+        self.data_type: str = data_type
+        self.train_labels: list = []
+        self.train_images: list = []
 
-        self.total_obj_counter = 0
-        self.total_bg_counter = 0
+        self.total_obj_counter: int = 0
+        self.total_bg_counter: int = 0
 
-        self.iou_threshold = iou_threshold
+        self.iou_threshold: float = iou_threshold
 
         self.transform = transforms.Compose([
             transforms.Resize((size, size)),
@@ -155,15 +155,15 @@ class RCNNDataset(torch.utils.data.Dataset):
             self.generate_dataset(dataloader, image_ratio)
         else:
             print("-= LOADING DATASET FROM", self.data_path, "=-")
-            with open(self.data_path + 'train_images.pkl', 'rb') as f:
-                self.train_images = pickle.load(f)
-            with open(self.data_path + 'train_labels.pkl', 'rb') as f:
-                self.train_labels = pickle.load(f)
+            for section_cache_index in tqdm(range(1, int(len(os.listdir("./cache"))/2))):
+                with open(self.data_path + "train_images_" + str(section_cache_index) + '.pkl', 'rb') as f:
+                    self.train_images += pickle.load(f)
+                with open(self.data_path + "train_labels_" + str(section_cache_index) + '.pkl', 'rb') as f:
+                    self.train_labels += pickle.load(f)
 
     def dataset_exists(self):
         # If both don't exist the other is kinda worthless
-        if os.path.exists(self.data_path + self.data_type + "_images.pkl") and os.path.exists(
-                self.data_path + self.data_type + "_labels.pkl"):
+        if len(os.listdir(self.data_path)) > 0:
             return True
         else:
             return False
@@ -192,13 +192,8 @@ class RCNNDataset(torch.utils.data.Dataset):
             for obj in data["annotation"]["object"]:
                 self.process_object(obj, ss_results, image, image_ratio)
 
-            del ss_results
-
-            print("IMAGES: ", sys.getsizeof(self.train_images) / 1e9, "GB")
-            print("LABELS: ", sys.getsizeof(self.train_labels) / 1e9, "GB")
-
             if index % self.section_size == 0 and index != 0:
-                self.create_section(index % self.section_size)
+                self.create_section(int(index / self.section_size))
 
         self.shuffle()
 
