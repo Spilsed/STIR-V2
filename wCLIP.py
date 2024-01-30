@@ -137,8 +137,9 @@ class RCNNDataset(torch.utils.data.Dataset):
         self.data_path: str = data_path + "/" if data_path[-1] != "/" else data_path
         self.section_size: int = section_size
         self.data_type: str = data_type
-        self.train_labels: list = []
-        self.train_images: list = []
+        self.train_labels: np.array = np.array([])
+        self.train_images: np.array = np.array([])
+        self.train_bboxes: np.array = np.array([])
 
         self.total_obj_counter: int = 0
         self.total_bg_counter: int = 0
@@ -149,6 +150,8 @@ class RCNNDataset(torch.utils.data.Dataset):
             transforms.Resize((size, size)),
             transforms.ToTensor(),
         ])
+
+        self.shuffle()
 
         # If the dataset doesn't exist, or it is being force remade generate a new dataset
         if not self.dataset_exists() or force_remake:
@@ -162,7 +165,6 @@ class RCNNDataset(torch.utils.data.Dataset):
                     self.train_labels += pickle.load(f)
 
     def dataset_exists(self):
-        # If both don't exist the other is kinda worthless
         if len(os.listdir(self.data_path)) > 0:
             return True
         else:
@@ -178,8 +180,12 @@ class RCNNDataset(torch.utils.data.Dataset):
                 "label": self.train_labels[idx][0], "bbox": self.train_labels[idx][1]}
 
     def shuffle(self):
-        r.shuffle(self.train_images)
-        r.shuffle(self.train_labels)
+        np.random.shuffle(self.train_images)
+        random_seed = r.randint(0, 9999)
+        generator = np.random.default_rng(random_seed)
+        generator.shuffle(self.train_labels)
+        generator = np.random.default_rng(random_seed)
+        generator.shuffle(self.train_bboxes)
 
     def generate_dataset(self, dataloader: DataLoader, image_ratio: tuple[int, int]):
 
@@ -191,9 +197,6 @@ class RCNNDataset(torch.utils.data.Dataset):
             # Process each object
             for obj in data["annotation"]["object"]:
                 self.process_object(obj, ss_results, image, image_ratio)
-
-            if index % self.section_size == 0 and index != 0:
-                self.create_section(int(index / self.section_size))
 
         self.shuffle()
 
@@ -225,8 +228,9 @@ class RCNNDataset(torch.utils.data.Dataset):
                 cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2], ::-1]
 
                 # Add cropped to images and label to labels
-                self.train_images.append(cropped)
-                self.train_labels.append([label_to_index(obj["name"]), ss_bbox])
+                np.append(self.train_images, cropped)
+                np.append(self.train_labels, label_to_index(obj["name"]))
+                np.append(self.train_bboxes, ss_bbox)
 
             elif bg_counter < image_ratio[1]:
                 bg_counter += 1
@@ -234,8 +238,9 @@ class RCNNDataset(torch.utils.data.Dataset):
                 # Crop image to ss_box (", ::-1]" to change from BGR to RGB)
                 cropped = np.asarray(image)[ss_bbox[1]:ss_bbox[1] + ss_bbox[3], ss_bbox[0]:ss_bbox[0] + ss_bbox[2], ::-1]
 
-                self.train_images.append(cropped)
-                self.train_labels.append([0, ss_bbox])
+                np.append(self.train_images, cropped)
+                np.append(self.train_labels, 0)
+                np.append(self.train_bboxes, ss_bbox)
 
             # Maintain ratio between the types
             if obj_counter >= image_ratio[0] and bg_counter == image_ratio[1]:
@@ -247,11 +252,14 @@ class RCNNDataset(torch.utils.data.Dataset):
     def create_section(self, section_id: int):
         with open(self.data_path + self.data_type + "_labels_" + str(section_id) +".pkl", "wb") as f:
             pickle.dump(self.train_labels, f)
+        with open(self.data_path + self.data_type + "_bboxes_" + str(section_id) + ".pkl", "wb") as f:
+            pickle.dump(self.train_bboxes, f)
         with open(self.data_path + self.data_type + "_images_" + str(section_id) +".pkl", "wb") as f:
             pickle.dump(self.train_images, f)
 
-        self.train_labels = []
-        self.train_images = []
+        self.train_labels = np.array([])
+        self.train_images = np.array([])
+        self.train_bboxes = np.array([])
 
 
 def main():
@@ -264,12 +272,12 @@ def main():
     dataloader_val = DataLoader(voc_val, batch_size=32, shuffle=True, pin_memory=True)
 
     # Create and save train dataset
-    train_dataset = RCNNDataset(dataloader_train, "train")
+    train_dataset = RCNNDataset(dataloader_train, "train", data_path="new_cache")
     with open("./" + "train_FullDataset.pkl", "wb") as f:
         pickle.dump(train_dataset, f)
 
     # Create and save val dataset
-    val_dataset = RCNNDataset(dataloader_val, "val")
+    val_dataset = RCNNDataset(dataloader_val, "val", data_path="new_cache")
     with open("./" + "val_FullDataset.pkl", "wb") as f:
         pickle.dump(val_dataset, f)
 
